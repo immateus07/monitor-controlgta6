@@ -8,7 +8,7 @@ import requests
 from bs4 import BeautifulSoup
 
 ARQUIVO = Path('historico.json')
-LOJAS = {'amazon.com.br':'Amazon', 'kabum.com.br':'KaBuM', 'magazineluiza.com.br':'Magalu', 'mercadolivre.com.br':'Mercado Livre', 'fastshop.com.br':'Fast Shop', 'casasbahia.com.br':'Casas Bahia', 'pontofrio.com.br':'Ponto Frio', 'carrefour.com.br':'Carrefour', 'sony.com.br':'Sony', 'playstation.com':'PlayStation', 'americanas.com.br':'Americanas'}
+LOJAS = {'amazon.com.br':'Amazon', 'kabum.com.br':'KaBuM', 'magazineluiza.com.br':'Magalu', 'mercadolivre.com.br':'Mercado Livre', 'fastshop.com.br':'Fast Shop', 'casasbahia.com.br':'Casas Bahia', 'pontofrio.com.br':'Ponto Frio', 'carrefour.com.br':'Carrefour', 'sony.com.br':'Sony', 'playstation.com':'PlayStation', 'americanas.com.br':'Americanas', 'wafuu.com':'WAFUU', 'bestbuy.com':'Best Buy', 'amazon.com':'Amazon EUA'}
 STATUS = {'InStock':'Em estoque', 'OutOfStock':'Sem estoque', 'SoldOut':'Sem estoque', 'PreOrder':'Pré-venda', 'BackOrder':'Sob encomenda', 'LimitedAvailability':'Disponibilidade limitada', 'Discontinued':'Descontinuado'}
 
 def norm(s):
@@ -63,6 +63,19 @@ def preco_num(x):
         return v if 0<v<float('inf') else None
     except (ValueError,TypeError): return None
 
+def custo(o, cfg):
+    moeda=str(o.get('priceCurrency','')).upper()
+    v=preco_num(o.get('price'))
+    if v is None: return None
+    if moeda=='BRL' and loja(cfg.get('_url','')) not in ('WAFUU','Best Buy','Amazon EUA'): return v
+    # Somente estimativa explicitamente configurada; nunca presume impostos zero.
+    c=cfg.get('importacao',{}).get(moeda,{})
+    try:
+        taxa=float(c['cambio']); frete=float(c['frete_brl']); imposto=float(c['impostos_brl'])
+        if not all(0<=x<float('inf') for x in (taxa,frete,imposto)) or taxa<=0: return None
+        return round(v*taxa+frete+imposto,2)
+    except (KeyError,TypeError,ValueError): return None
+
 def extrair(soup, url, cfg):
     origem=loja(url)
     for script in soup.find_all('script',type='application/ld+json'):
@@ -80,14 +93,14 @@ def extrair(soup, url, cfg):
             if not isinstance(ofertas,list): continue
             for o in ofertas:
                 if not isinstance(o,dict) or str(o.get('@type',''))=='AggregateOffer': continue
-                if str(o.get('priceCurrency','')).upper()!='BRL': continue
+                if not o.get('priceCurrency'): continue
                 if any(x in str(o.get('itemCondition','')) for x in ('UsedCondition','RefurbishedCondition','DamagedCondition')): continue
                 st=str(o.get('availability','')).rstrip('/').split('/')[-1]
-                v=preco_num(o.get('price'))
+                v=custo(o,dict(cfg,_url=url))
                 if st not in STATUS: continue
                 seller=o.get('seller',{})
                 if isinstance(seller,dict): seller=seller.get('name','')
-                yield dict(nome=nome,loja=origem,vendedor=str(seller or 'Não informado'),preco=v,status=STATUS[st],url=canon(url))
+                yield dict(nome=nome,loja=origem,vendedor=str(seller or 'Não informado'),preco=v,status=STATUS[st],url=canon(url),estimativa=(origem in ('WAFUU','Best Buy','Amazon EUA') or str(o.get('priceCurrency','')).upper()!='BRL'))
     # Amazon: fallback apenas com título e disponibilidade explícitos na página.
     if origem=='Amazon':
         title=soup.select_one('#productTitle'); av=soup.select_one('#availability')
@@ -99,9 +112,17 @@ def extrair(soup, url, cfg):
                 seller=soup.select_one('#sellerProfileTrigger')
                 yield dict(nome=title.get_text(' ',strip=True),loja=origem,vendedor=seller.get_text(' ',strip=True) if seller else 'Não informado',preco=preco_num(pr.get_text(strip=True)) if pr else None,status=st,url=canon(url))
 
+def pagina_produto(url):
+    p=urlparse(url); path=p.path.lower()
+    if loja(url)=='Magalu': return '/p/' in path and '/busca/' not in path
+    if loja(url) in ('Amazon','Amazon EUA'): return bool(re.search(r'/dp/[a-z0-9]{10}',path))
+    if loja(url)=='PlayStation' and 'store.playstation.com' in p.netloc: return False
+    return not any(x in path for x in ('/busca/','/search/'))
+
 def verificar(url,cfg):
     try:
-        r=requests.get(url,timeout=15,headers={'User-Agent':'MonitorDePrecos/4.0','Accept-Language':'pt-BR,pt;q=0.9'})
+        if not pagina_produto(url): return [],'página de busca ignorada; use link direto'
+        r=requests.get(url,timeout=15,headers={'User-Agent':'MonitorDePrecos/5.0','Accept-Language':'pt-BR,pt;q=0.9'})
         r.raise_for_status()
         if not loja(r.url): return [],'redirecionamento fora das lojas permitidas'
         soup=BeautifulSoup(r.text,'html.parser')
@@ -120,7 +141,7 @@ def descobrir(cfg):
             ok+=1
             for item in itens:
                 u=item.get('href','')
-                if loja(u): links.add(canon(u))
+                if loja(u) and pagina_produto(u): links.add(canon(u))
             print('Busca',backend,':',len(itens),'resultados',flush=True)
         except Exception as e: print('Busca',backend,':',type(e).__name__,str(e)[:120],flush=True)
     return links,ok
@@ -144,6 +165,7 @@ def registrar(o,h,cfg):
     titulo='🚨 POSSÍVEL OFERTA' if status=='Em estoque' else '⚠️ '+status.upper()
     valor=f"R$ {v:.2f}".replace('.',',')
     msg=f"{titulo} — {cfg['nome']}\n💰 {valor}\n🏪 {o['loja']}\n👤 Vendedor: {o['vendedor']}\n📦 {status} segundo a página\n🔗 {o['url']}\nConfira vendedor, produto, frete e preço final."
+    if o.get('estimativa'): msg+='\nImportação: estimativa manual, não é preço final confirmado.'
     if not telegram(msg): return 'falha Telegram'
     h[k]=estado; return 'notificado'
 
@@ -161,7 +183,7 @@ def carregar_produtos():
         if not c.get('modelo') and not c.get('termos_obrigatorios'): raise ValueError('Informe modelo ou termos obrigatórios para '+c['id'])
         for u in c.get('links',[]):
             if not loja(u): raise ValueError('Link fora das lojas permitidas: '+u)
-    return [c for c in configs if c.get('ativo',True)]
+    return configs
 
 
 def monitorar(cfg,h,cache):
@@ -169,11 +191,14 @@ def monitorar(cfg,h,cache):
     novos,ok=descobrir(cfg)
     fixos=cfg.get('links',[])
     links=list(dict.fromkeys(fixos+h.get('links',[])+sorted(novos)))[:15]
-    resultados={}; erros=[]; validados=set(); falhas=0
+    resultados={}; erros=[]; validados=set(); falhas=0; bloqueadas=set()
     for u in links:
+        if loja(u) in bloqueadas: continue
         print('Consultando:',u,flush=True)
         ofertas,diag=verificar(u,cfg)
-        if not ofertas: erros.append(f'{loja(u)}: {diag}'); print(diag,flush=True)
+        if not ofertas:
+            erros.append(f'{loja(u)}: {diag}'); print(diag,flush=True)
+            if diag in ('HTTP 403','HTTP 429'): bloqueadas.add(loja(u))
         else: validados.add(u)
         for o in ofertas:
             k=chave(o)
@@ -193,7 +218,7 @@ def monitorar(cfg,h,cache):
 
 
 def main():
-    print('Monitor v4.0 — múltiplos produtos',flush=True)
+    print('Monitor v5.0 — múltiplos produtos e Telegram',flush=True)
     configs=carregar_produtos()
     cache=json.loads(ARQUIVO.read_text(encoding='utf-8')) if ARQUIVO.exists() else {}
     if not isinstance(cache,dict): raise ValueError('Histórico inválido')
@@ -208,14 +233,22 @@ def main():
                 antigos[k.split('|',1)[1]]=estado
         todos['dualsense-gta6-preto']={'ofertas':antigos,'links':cache.get('_links',[])}
     teste=os.getenv('TESTE_TELEGRAM','').lower()=='true'
+    agora=datetime.now(ZoneInfo('America/Sao_Paulo'))
+    slot=agora.strftime('%Y-%m-%d %H')
+    buscar=comandos(configs,cache)
+    configs=[c for c in configs if c.get('ativo',True)]
+    if not (teste or buscar or cache.get('_v5_hora')!=slot):
+        salvar(cache); print('Comandos processados; busca horária já realizada.'); return
     linhas=[]; total=0; falhas=0
     for cfg in configs:
         h=todos.setdefault(cfg['id'],{})
         l,n,f=monitorar(cfg,h,cache); linhas.extend(l); total+=n; falhas+=f
         salvar(cache)
-    agora=datetime.now(ZoneInfo('America/Sao_Paulo')); dia=agora.date().isoformat()
+    cache['_v5_hora']=slot
+    cache['_v5_status']={'hora':agora.isoformat(),'linhas':linhas,'total':total}
+    dia=agora.date().isoformat()
     if teste or (agora.hour>=8 and cache.get('_v4_resumo')!=dia):
-        texto='📋 Relatório monitor v4.0\n'+('\n'.join(linhas) if linhas else 'Nenhum produto ativo.')+'\nFalha de consulta não significa falta de estoque.'
+        texto='📋 Relatório monitor v5.0\n'+('\n'.join(linhas) if linhas else 'Nenhum produto ativo.')+'\nFalha de consulta não significa falta de estoque.'
         partes=[]
         while texto:
             partes.append(texto[:3500]); texto=texto[3500:]
@@ -226,5 +259,87 @@ def main():
     salvar(cache)
     print('Produtos ativos:',len(configs),'| Ofertas verificadas:',total,flush=True)
     if (configs and not total) or falhas: raise SystemExit(1)
+
+def gravar_produtos(configs):
+    p=Path('produtos.json'); tmp=p.with_suffix('.tmp')
+    tmp.write_text(json.dumps(configs,ensure_ascii=False,indent=2)+'\n',encoding='utf-8'); tmp.replace(p)
+
+AJUDA = """Comandos do monitor:
+/produtos
+/adicionar nome | preço | modelo opcional | termos separados por vírgula
+/preco ID | 800
+/pausar ID
+/ativar ID
+/remover ID
+/link ID | https://loja/produto
+/estoque ID | sim ou nao
+/importacao ID | USD | cambio | frete BRL | impostos BRL
+/buscar
+/status
+/ajuda
+Use /produtos para copiar o ID. Configurações e histórico ficam no repositório."""
+
+def aplicar(texto, configs, cache):
+    import uuid
+    cmd, _, arg=texto.strip().partition(' '); cmd=cmd.lower().split('@')[0]
+    partes=[x.strip() for x in arg.split('|')]
+    if cmd in ('/ajuda','/start'): return AJUDA,False,False
+    if cmd=='/produtos':
+        return ('\n'.join(f"{c['id']} — {c['nome']} | R$ {c['preco_maximo']:.2f} | {'ativo' if c.get('ativo',True) else 'pausado'}" for c in configs) or 'Nenhum produto.'),False,False
+    if cmd=='/status':
+        st=cache.get('_v5_status',{}); return ('Última busca: '+st.get('hora','ainda não realizada')+'\n'+'\n'.join(st.get('linhas',[]))),False,False
+    if cmd=='/buscar': return 'Busca solicitada nesta execução.',False,True
+    if cmd=='/adicionar':
+        if len(partes)<2 or not partes[0]: raise ValueError('Use /adicionar nome | preço | modelo opcional | termos')
+        if len(configs)>=10: raise ValueError('Limite de 10 cadastros nesta versão.')
+        nome=partes[0]; v=preco_num(partes[1]); modelo=partes[2] if len(partes)>2 else ''
+        termos=[x.strip() for x in partes[3].split(',') if x.strip()] if len(partes)>3 else nome.split()
+        if v is None or not (modelo or termos): raise ValueError('Preço ou identificação inválidos.')
+        ident='p-'+uuid.uuid4().hex[:10]
+        configs.append(dict(id=ident,nome=nome,modelo=modelo,preco_maximo=v,ativo=True,avisar_sem_estoque=True,avisar_pre_venda=True,consulta=nome+' '+modelo+' Brasil',termos_obrigatorios=termos,termos_excluidos=[],links=[]))
+        return 'Cadastrado: '+ident,True,False
+    if cmd not in ('/preco','/pausar','/ativar','/remover','/link','/estoque','/importacao'): return AJUDA,False,False
+    c=next((c for c in configs if c['id']==partes[0]),None)
+    if c is None: raise ValueError('ID não encontrado. Consulte /produtos.')
+    if cmd=='/preco':
+        v=preco_num(partes[1]) if len(partes)==2 else None
+        if v is None: raise ValueError('Use /preco ID | 800')
+        c['preco_maximo']=v
+    elif cmd=='/pausar': c['ativo']=False
+    elif cmd=='/ativar': c['ativo']=True
+    elif cmd=='/remover': configs.remove(c)
+    elif cmd=='/link':
+        if len(partes)!=2 or not loja(partes[1]) or not pagina_produto(partes[1]): raise ValueError('Informe link direto HTTPS de loja permitida.')
+        c['links']=list(dict.fromkeys(c.get('links',[])+[canon(partes[1])]))[:15]
+    elif cmd=='/importacao':
+        if len(partes)!=5 or not re.fullmatch('[A-Z]{3}',partes[1].upper()): raise ValueError('Use /importacao ID | USD | cambio | frete BRL | impostos BRL')
+        valores=[float(x.replace(',','.')) for x in partes[2:]]
+        if not all(0<=v<float('inf') for v in valores) or valores[0]<=0: raise ValueError('Valores inválidos')
+        c.setdefault('importacao',{})[partes[1].upper()]=dict(zip(('cambio','frete_brl','impostos_brl'),valores))
+    elif cmd=='/estoque':
+        if len(partes)!=2 or norm(partes[1]) not in ('sim','nao'): raise ValueError('Use /estoque ID | sim ou nao')
+        c['avisar_sem_estoque']=norm(partes[1])=='sim'
+    return 'Configuração atualizada: '+c['id'],True,False
+
+def comandos(configs,cache):
+    buscar=False
+    try:
+        r=requests.post('https://api.telegram.org/bot'+os.environ['TELEGRAM_BOT_TOKEN']+'/getUpdates',json={'offset':cache.get('_v5_offset',0),'timeout':0,'allowed_updates':['message']},timeout=15)
+        r.raise_for_status(); dados=r.json()
+        if not dados.get('ok'): raise ValueError('getUpdates recusado')
+    except (requests.RequestException,ValueError,KeyError):
+        print('Telegram: não foi possível consultar comandos; monitor segue.'); return False
+    for u in dados.get('result',[]):
+        m=u.get('message',{}); chat=m.get('chat',{})
+        if str(chat.get('id'))==os.environ['TELEGRAM_CHAT_ID'] and chat.get('type')=='private' and str(m.get('from',{}).get('id'))==os.environ['TELEGRAM_CHAT_ID'] and m.get('text','').startswith('/'):
+            try:
+                resposta,mudou,agora=aplicar(m['text'],configs,cache)
+                if mudou: gravar_produtos(configs)
+                buscar=buscar or agora
+            except (ValueError,IndexError) as e: resposta=str(e)
+            for i in range(0,len(resposta),3500): telegram(resposta[i:i+3500])
+        cache['_v5_offset']=max(cache.get('_v5_offset',0),u['update_id']+1)
+        salvar(cache)
+    return buscar
 
 if __name__=='__main__': main()
