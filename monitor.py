@@ -1,18 +1,18 @@
-import os, json, time, hashlib, unicodedata
+"""Monitor DualSense GTA VI preto. Sem APIs pagas."""
+import os, json, re, time, unicodedata
 from pathlib import Path
-from urllib.parse import urlparse
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from urllib.parse import urlparse, urlunparse
 import requests
 from bs4 import BeautifulSoup
-from ddgs import DDGS
 
 LIMITE = 800
 MODELO = '1000056977'
-LOJAS = {'amazon.com.br':'Amazon', 'kabum.com.br':'KaBuM', 'magazineluiza.com.br':'Magalu', 'mercadolivre.com.br':'Mercado Livre', 'fastshop.com.br':'Fast Shop', 'casasbahia.com.br':'Casas Bahia', 'pontofrio.com.br':'Ponto Frio', 'carrefour.com.br':'Carrefour', 'sony.com.br':'Sony', 'playstation.com':'PlayStation'}
 ARQUIVO = Path('historico.json')
-LINKS_FIXOS = {
-    'https://www.kabum.com.br/produto/1071923/controle-sem-fio-sony-dualsense-ps5-edicao-limitada-grand-theft-auto-vi-preto-1000056977',
-    'https://www.amazon.com.br/dp/B0HHNVBHQ5',
-}
+LOJAS = {'amazon.com.br':'Amazon', 'kabum.com.br':'KaBuM', 'magazineluiza.com.br':'Magalu', 'mercadolivre.com.br':'Mercado Livre', 'fastshop.com.br':'Fast Shop', 'casasbahia.com.br':'Casas Bahia', 'pontofrio.com.br':'Ponto Frio', 'carrefour.com.br':'Carrefour', 'sony.com.br':'Sony', 'playstation.com':'PlayStation', 'americanas.com.br':'Americanas'}
+FIXOS = ['https://www.kabum.com.br/produto/1071923/controle-sem-fio-sony-dualsense-ps5-edicao-limitada-grand-theft-auto-vi-preto-1000056977', 'https://www.amazon.com.br/dp/B0HHNVBHQ5']
+STATUS = {'InStock':'Em estoque', 'OutOfStock':'Sem estoque', 'SoldOut':'Sem estoque', 'PreOrder':'Pré-venda', 'BackOrder':'Sob encomenda', 'LimitedAvailability':'Disponibilidade limitada', 'Discontinued':'Descontinuado'}
 
 def norm(s):
     return ''.join(c for c in unicodedata.normalize('NFD', str(s).lower()) if not unicodedata.combining(c))
@@ -20,117 +20,160 @@ def norm(s):
 def loja(url):
     p = urlparse(url)
     h = p.hostname or ''
-    if p.scheme != 'https': return None
-    return next((v for k,v in LOJAS.items() if h == k or h.endswith('.'+k)), None)
+    return next((v for k,v in LOJAS.items() if p.scheme == 'https' and (h == k or h.endswith('.'+k))), None)
+
+def canon(url):
+    p = urlparse(url)
+    m = re.search(r'/dp/([A-Z0-9]{10})', p.path, re.I)
+    if loja(url) == 'Amazon' and m: return 'https://www.amazon.com.br/dp/'+m.group(1).upper()
+    m = re.search(r'/produto/(\d+)', p.path)
+    if loja(url) == 'KaBuM' and m and m.group(1)=='1071923': return FIXOS[0]
+    return urlunparse((p.scheme,p.netloc,p.path,'','',''))
 
 def telegram(msg):
     try:
-        r = requests.post('https://api.telegram.org/bot'+os.environ['TELEGRAM_BOT_TOKEN']+'/sendMessage', json={'chat_id':os.environ['TELEGRAM_CHAT_ID'],'text':msg}, timeout=20)
-        return r.ok and r.json().get('ok', False)
-    except (requests.RequestException, ValueError):
-        print('Falha de comunicacao com Telegram')
+        r = requests.post('https://api.telegram.org/bot'+os.environ['TELEGRAM_BOT_TOKEN']+'/sendMessage', json={'chat_id':os.environ['TELEGRAM_CHAT_ID'],'text':msg,'disable_web_page_preview':True}, timeout=20)
+        ok = r.ok and r.json().get('ok',False)
+        print('Telegram:', 'enviado' if ok else f'falha HTTP {r.status_code}', flush=True)
+        return ok
+    except (requests.RequestException, ValueError, KeyError):
+        print('Telegram: falha de comunicação ou configuração', flush=True)
         return False
 
+def salvar(h):
+    tmp=ARQUIVO.with_suffix('.tmp'); tmp.write_text(json.dumps(h,ensure_ascii=False,indent=2)+'\n',encoding='utf-8'); tmp.replace(ARQUIVO)
+
 def percorrer(x):
-    if isinstance(x, dict):
+    if isinstance(x,dict):
         yield x
         for v in x.values(): yield from percorrer(v)
-    elif isinstance(x, list):
+    elif isinstance(x,list):
         for v in x: yield from percorrer(v)
+
+def corresponde(nome, identificadores=''):
+    t=norm(nome)
+    if any(x in t for x in ('branco','white','adesivo','capa','skin','case','replica','usado','personalizado','customizado','carcaca','shell','seminovo')) or '1000056978' in str(identificadores): return False
+    return MODELO in str(nome)+' '+str(identificadores) or ('dualsense' in t and any(x in t for x in ('gta vi','gta 6','grand theft auto vi')) and any(x in t for x in ('preto','black')))
+
+def preco_num(x):
+    try:
+        s=str(x).strip().replace('R$','').strip()
+        if ',' in s: s=s.replace('.','').replace(',','.')
+        v=float(s)
+        return v if 0<v<float('inf') else None
+    except (ValueError,TypeError): return None
+
+def extrair(soup, url):
+    origem=loja(url)
+    for script in soup.find_all('script',type='application/ld+json'):
+        try: dados=json.loads(script.get_text())
+        except (ValueError,TypeError): continue
+        for p in percorrer(dados):
+            tipos=p.get('@type',[])
+            if isinstance(tipos,str): tipos=[tipos]
+            if not isinstance(tipos,list) or 'Product' not in tipos: continue
+            nome=str(p.get('name',''))
+            ids=' '.join(str(p.get(k,'')) for k in ('sku','mpn','model','gtin'))
+            if not corresponde(nome,ids): continue
+            ofertas=p.get('offers',[])
+            if isinstance(ofertas,dict): ofertas=[ofertas]
+            if not isinstance(ofertas,list): continue
+            for o in ofertas:
+                if not isinstance(o,dict) or str(o.get('@type',''))=='AggregateOffer': continue
+                if str(o.get('priceCurrency','')).upper()!='BRL': continue
+                if any(x in str(o.get('itemCondition','')) for x in ('UsedCondition','RefurbishedCondition','DamagedCondition')): continue
+                st=str(o.get('availability','')).rstrip('/').split('/')[-1]
+                v=preco_num(o.get('price'))
+                if st not in STATUS: continue
+                seller=o.get('seller',{})
+                if isinstance(seller,dict): seller=seller.get('name','')
+                yield dict(nome=nome,loja=origem,vendedor=str(seller or 'Não informado'),preco=v,status=STATUS[st],url=canon(url))
+    # Amazon: fallback apenas com título e disponibilidade explícitos na página.
+    if origem=='Amazon':
+        title=soup.select_one('#productTitle'); av=soup.select_one('#availability')
+        if title and av and corresponde(title.get_text(' ',strip=True)):
+            t=norm(av.get_text(' ',strip=True))
+            st=next((s for termos,s in [(('nao disponivel','indisponivel','sem estoque'),'Sem estoque'),(('pre-venda',),'Pré-venda'),(('em estoque',),'Em estoque')] if any(x in t for x in termos)),None)
+            if st:
+                pr=soup.select_one('#corePrice_feature_div .a-offscreen, #corePriceDisplay_desktop_feature_div .a-offscreen')
+                seller=soup.select_one('#sellerProfileTrigger')
+                yield dict(nome=title.get_text(' ',strip=True),loja=origem,vendedor=seller.get_text(' ',strip=True) if seller else 'Não informado',preco=preco_num(pr.get_text(strip=True)) if pr else None,status=st,url=canon(url))
 
 def verificar(url):
     try:
-        r = requests.get(url, timeout=15, headers={'User-Agent':'MonitorDePrecos/1.0','Accept-Language':'pt-BR'})
+        r=requests.get(url,timeout=15,headers={'User-Agent':'MonitorDePrecos/3.0','Accept-Language':'pt-BR,pt;q=0.9'})
         r.raise_for_status()
-        nome_loja = loja(r.url)
-        if not nome_loja: return
+        if not loja(r.url): return [],'redirecionamento fora das lojas permitidas'
+        soup=BeautifulSoup(r.text,'html.parser')
+        ofertas=list(extrair(soup,r.url))
+        if not ofertas: return [],f'HTTP {r.status_code}; sem dados válidos ({len(r.content)} bytes)'
+        return ofertas,'OK'
     except requests.RequestException as e:
-        print('Pagina indisponivel:', url, 'HTTP:', e.response.status_code if e.response is not None else 'sem resposta')
-        return
-    soup = BeautifulSoup(r.text, 'html.parser')
-    scripts = soup.find_all('script', type='application/ld+json')
-    print('HTTP:', r.status_code, '| URL final:', r.url, '| bytes:', len(r.content), flush=True)
-    print('Titulo:', soup.title.get_text(strip=True)[:180] if soup.title else '(sem titulo)', '| JSON-LD:', len(scripts), flush=True)
-    print('Metadados de preco:', [(m.get('property') or m.get('itemprop'), m.get('content')) for m in soup.find_all('meta') if 'price' in str(m.get('property') or m.get('itemprop') or '').lower()][:8], flush=True)
-    for script in scripts:
-        try: dados = json.loads(script.get_text())
-        except (ValueError, TypeError): continue
-        for p in percorrer(dados):
-            tipos = p.get('@type', [])
-            if isinstance(tipos,str): tipos = [tipos]
-            if not isinstance(tipos,list) or 'Product' not in tipos: continue
-            nome = str(p.get('name',''))
-            print('Product encontrado:', nome[:180], '| SKU:', p.get('sku'), '| MPN:', p.get('mpn'), flush=True)
-            texto = norm(nome)
-            codigo = MODELO in ' '.join(str(p.get(k,'')) for k in ('name','sku','mpn','model','gtin'))
-            if '1000056978' in str(p) or 'branco' in texto or 'white' in texto: continue
-            if not (codigo or ('dualsense' in texto and any(t in texto for t in ('gta vi','gta 6','grand theft auto vi')) and any(t in texto for t in ('preto','black')))): continue
-            if any(t in texto for t in ('adesivo','capa','skin','case','replica','usado','personalizado','customizado','carcaca','shell','seminovo')): continue
-            ofertas = p.get('offers', [])
-            if isinstance(ofertas,dict): ofertas = [ofertas]
-            if not isinstance(ofertas,list): continue
-            for o in ofertas:
-                if not isinstance(o,dict): continue
-                print('Dados da oferta:', {k: o.get(k) for k in ('@type','price','priceCurrency','availability','itemCondition')}, flush=True)
-                if str(o.get('priceCurrency','')).upper() != 'BRL': continue
-                estoque = str(o.get('availability','')).rstrip('/').split('/')[-1]
-                if estoque not in ('InStock','OutOfStock','PreOrder','BackOrder','SoldOut','Discontinued','LimitedAvailability'): continue
-                if any(t in str(o.get('itemCondition','')) for t in ('UsedCondition','RefurbishedCondition','DamagedCondition')): continue
-                try: preco = float(o['price'])
-                except (KeyError, ValueError, TypeError): continue
-                if not 0 < preco < float('inf'): continue
-                vendedor = o.get('seller',{})
-                if isinstance(vendedor,dict): vendedor = vendedor.get('name','')
-                yield nome, preco, nome_loja, vendedor or 'Nao informado', r.url, codigo, estoque
+        return [],f'HTTP {e.response.status_code}' if e.response is not None else type(e).__name__
+
+def descobrir():
+    from ddgs import DDGS
+    links=set(); ok=0
+    for backend in ('duckduckgo','bing','brave'):
+        try:
+            itens=DDGS(timeout=12).text(f'"{MODELO}" DualSense GTA VI Brasil',region='br-pt',max_results=15,backend=backend)
+            ok+=1
+            for item in itens:
+                u=item.get('href','')
+                if loja(u): links.add(canon(u))
+            print('Busca',backend,':',len(itens),'resultados',flush=True)
+        except Exception as e: print('Busca',backend,':',type(e).__name__,str(e)[:120],flush=True)
+    return links,ok
+
+def chave(o):
+    return '|'.join((MODELO,o['loja'],norm(o['vendedor'])))
+
+def registrar(o,h,forcar=False):
+    k=chave(o); anterior=h.get(k); estado={'preco':o['preco'],'status':o['status']}
+    v=o['preco']; elegivel=v is not None and v<=LIMITE
+    if not elegivel:
+        # Preserva a mudança para notificar quando retornar ao orçamento.
+        h[k]=estado; return 'fora do limite ou sem preço'
+    if not forcar and anterior==estado: return 'duplicado ignorado'
+    titulo='🚨 POSSÍVEL OFERTA' if o['status']=='Em estoque' else '⚠️ '+o['status'].upper()
+    valor=f"R$ {v:.2f}".replace('.',',')
+    msg=f"{titulo} — DualSense GTA VI preto\n💰 {valor}\n🏪 {o['loja']}\n👤 Vendedor: {o['vendedor']}\n📦 {o['status']} segundo a página\n🔗 {o['url']}\nConfira vendedor, frete, impostos e preço final."
+    if not telegram(msg): return 'falha Telegram'
+    h[k]=estado; salvar(h); return 'notificado'
 
 def main():
-    print('Monitor v2.5 - alertas de estoque', flush=True)
-    if os.getenv('TESTE_TELEGRAM','').lower() == 'true':
-        if not telegram(f'✅ Monitor GTA VI conectado! Limite: até R$ {LIMITE}. Busca a cada hora.'): raise SystemExit('Falha no teste do Telegram. Confira os Secrets.')
-    historico = json.loads(ARQUIVO.read_text(encoding='utf-8')) if ARQUIVO.exists() else {}
-    links = set(LINKS_FIXOS)
-    consultas = ['"DualSense" "GTA VI" controle Brasil', '"1000056977" controle Brasil', '"DualSense" "Grand Theft Auto VI" edição limitada Brasil']
-    sucesso = 0
-    for q in consultas:
-        try:
-            for item in DDGS(timeout=15).text(q, region='br-pt', max_results=25):
-                u = item.get('href','')
-                if loja(u): links.add(u)
-            sucesso += 1
-        except Exception as e: print('Falha de busca:', type(e).__name__, str(e)[:350], flush=True)
-        time.sleep(2)
-    if not sucesso: print('Todas as buscas falharam; continuando com os links fixos.')
-    print('Links encontrados:',len(links))
-    verificadas = 0
-    falhas = 0
-    elegiveis = 0
-    for url in sorted(links, key=lambda u: (u not in LINKS_FIXOS, u)):
-        print('Consultando:', url)
-        for nome, preco, origem, vendedor, link, codigo, estoque in verificar(url):
-            verificadas += 1
-            print(origem, nome, preco, estoque, flush=True)
-            if preco > LIMITE or estoque not in ("InStock", "OutOfStock", "SoldOut"): continue
-            disponivel = estoque == "InStock"
-            if disponivel: elegiveis += 1
-            status = "disponivel" if disponivel else "sem estoque"
-            chave = hashlib.sha256((link+'|'+str(vendedor)).encode()).hexdigest()
-            anterior = historico.get(chave)
-            if isinstance(anterior, dict) and anterior.get("status") == status and anterior.get("preco") == preco: continue
-            if isinstance(anterior, (int, float)) and disponivel and anterior == preco: continue
-            valor = f'{preco:.2f}'.replace('.',',')
-            modelo = 'Codigo identificado' if codigo else 'Nome compativel; confira o codigo'
-            titulo = '🚨 POSSÍVEL OFERTA GTA VI' if disponivel else '⚠️ GTA VI — SEM ESTOQUE'
-            detalhe = 'Em estoque segundo a página' if disponivel else 'Sem estoque — preço anunciado, compra indisponível'
-            msg = f'{titulo}\n\n🎮 {nome}\n💰 R$ {valor}\n🏪 {origem}\n👤 Vendedor: {vendedor}\n📦 {detalhe}\n🔎 {modelo}\n\nConfira vendedor, originalidade, frete, impostos e preco final.\n🔗 {link}'
-            if telegram(msg):
-                historico[chave] = {"preco": preco, "status": status}
-                ARQUIVO.write_text(json.dumps(historico,indent=2)+'\n',encoding='utf-8')
-            else: falhas += 1
+    print('Monitor v3.0 — múltiplas buscas e relatório',flush=True)
+    h=json.loads(ARQUIVO.read_text(encoding='utf-8')) if ARQUIVO.exists() else {}
+    teste=os.getenv('TESTE_TELEGRAM','').lower()=='true'
+    if teste and not telegram('✅ Monitor v3.0 conectado. Limite R$ 800. Teste manual com relatório.'): raise SystemExit(1)
+    novos,ok=descobrir(); links=list(dict.fromkeys(FIXOS+list(h.get('_links',[]))+sorted(novos)))[:25]
+    resultados={}; erros=[]; validados=set()
+    for u in links:
+        if not loja(u): continue
+        print('Consultando:',u,flush=True)
+        ofertas,diag=verificar(u)
+        if not ofertas: erros.append(f'{loja(u)}: {diag}'); print(diag,flush=True)
+        else: validados.add(u)
+        for o in ofertas:
+            k=chave(o)
+            # Prefere oferta com preço informado, depois disponibilidade e menor preço.
+            rank=lambda x:(x['preco'] is None,x['status']!='Em estoque',x['preco'] or float('inf'))
+            if k not in resultados or rank(o)<rank(resultados[k]): resultados[k]=o
         time.sleep(1)
-    print('Ofertas verificadas (incluindo sem estoque):',verificadas)
-    print('Ofertas em estoque ate o limite:',elegiveis)
-    if verificadas and not elegiveis: print('Nenhuma oferta elegivel nas paginas validadas.')
-    if not verificadas: raise SystemExit('Nenhuma oferta validada; confira os logs. Isso nao comprova ausencia de estoque.')
-    if falhas: raise SystemExit('Falha ao enviar uma ou mais notificacoes.')
+    h['_links']=sorted(validados-set(FIXOS))[:20]
+    falhas=0; linhas=[]
+    for o in resultados.values():
+        acao=registrar(o,h); falhas+=acao=='falha Telegram'
+        linha=f"{o['loja']}: {o['status']} | "+(f"R$ {o['preco']:.2f}" if o['preco'] is not None else 'preço não confirmado')+f" | {acao}"
+        print(linha,flush=True); linhas.append(linha)
+    agora=datetime.now(ZoneInfo('America/Sao_Paulo')); dia=agora.date().isoformat()
+    if teste or (agora.hour>=8 and h.get('_resumo')!=dia):
+        msg='📋 Relatório monitor GTA VI\n'+ '\n'.join(linhas+erros)[:3000]+f'\nBuscadores com resposta: {ok}/3\nLojas não verificadas não significam falta de estoque.'
+        if telegram(msg):
+            if not teste: h['_resumo']=dia
+        else: falhas+=1
+    salvar(h)
+    print('Ofertas verificadas:',len(resultados),'| Consultas sem validação:',len(erros),flush=True)
+    if not resultados or falhas: raise SystemExit(1)
 
-if __name__ == '__main__': main()
+if __name__=='__main__': main()
