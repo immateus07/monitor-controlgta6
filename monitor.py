@@ -5,7 +5,7 @@ import requests
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 
-LIMITE = 600
+LIMITE = 800
 MODELO = '1000056977'
 LOJAS = {'amazon.com.br':'Amazon', 'kabum.com.br':'KaBuM', 'magazineluiza.com.br':'Magalu', 'mercadolivre.com.br':'Mercado Livre', 'fastshop.com.br':'Fast Shop', 'casasbahia.com.br':'Casas Bahia', 'pontofrio.com.br':'Ponto Frio', 'carrefour.com.br':'Carrefour', 'sony.com.br':'Sony', 'playstation.com':'PlayStation'}
 ARQUIVO = Path('historico.json')
@@ -62,7 +62,7 @@ def verificar(url):
             nome = str(p.get('name',''))
             print('Product encontrado:', nome[:180], '| SKU:', p.get('sku'), '| MPN:', p.get('mpn'), flush=True)
             texto = norm(nome)
-            codigo = MODELO in ' '.join(str(p.get(k,'')) for k in ('sku','mpn','model','gtin'))
+            codigo = MODELO in ' '.join(str(p.get(k,'')) for k in ('name','sku','mpn','model','gtin'))
             if '1000056978' in str(p) or 'branco' in texto or 'white' in texto: continue
             if not (codigo or ('dualsense' in texto and any(t in texto for t in ('gta vi','gta 6','grand theft auto vi')) and any(t in texto for t in ('preto','black')))): continue
             if any(t in texto for t in ('adesivo','capa','skin','case','replica','usado','personalizado','customizado','carcaca','shell','seminovo')): continue
@@ -73,19 +73,20 @@ def verificar(url):
                 if not isinstance(o,dict): continue
                 print('Dados da oferta:', {k: o.get(k) for k in ('@type','price','priceCurrency','availability','itemCondition')}, flush=True)
                 if str(o.get('priceCurrency','')).upper() != 'BRL': continue
-                if str(o.get('availability','')).rstrip('/').split('/')[-1] != 'InStock': continue
+                estoque = str(o.get('availability','')).rstrip('/').split('/')[-1]
+                if estoque not in ('InStock','OutOfStock','PreOrder','BackOrder','SoldOut','Discontinued','LimitedAvailability'): continue
                 if any(t in str(o.get('itemCondition','')) for t in ('UsedCondition','RefurbishedCondition','DamagedCondition')): continue
                 try: preco = float(o['price'])
                 except (KeyError, ValueError, TypeError): continue
                 if not 0 < preco < float('inf'): continue
                 vendedor = o.get('seller',{})
                 if isinstance(vendedor,dict): vendedor = vendedor.get('name','')
-                yield nome, preco, nome_loja, vendedor or 'Nao informado', r.url, codigo
+                yield nome, preco, nome_loja, vendedor or 'Nao informado', r.url, codigo, estoque
 
 def main():
-    print('Monitor v2.1 - diagnostico de paginas', flush=True)
+    print('Monitor v2.4 - alertas de estoque', flush=True)
     if os.getenv('TESTE_TELEGRAM','').lower() == 'true':
-        if not telegram('✅ Monitor GTA VI conectado! Limite: abaixo de R$ 600. Busca a cada hora.'): raise SystemExit('Falha no teste do Telegram. Confira os Secrets.')
+        if not telegram(f'✅ Monitor GTA VI conectado! Limite: até R$ {LIMITE}. Busca a cada hora.'): raise SystemExit('Falha no teste do Telegram. Confira os Secrets.')
     historico = json.loads(ARQUIVO.read_text(encoding='utf-8')) if ARQUIVO.exists() else {}
     links = set(LINKS_FIXOS)
     consultas = ['"DualSense" "GTA VI" controle Brasil', '"1000056977" controle Brasil', '"DualSense" "Grand Theft Auto VI" edição limitada Brasil']
@@ -93,33 +94,3 @@ def main():
     for q in consultas:
         try:
             for item in DDGS(timeout=15).text(q, region='br-pt', max_results=25):
-                u = item.get('href','')
-                if loja(u): links.add(u)
-            sucesso += 1
-        except Exception as e: print('Falha de busca:', type(e).__name__, str(e)[:350], flush=True)
-        time.sleep(2)
-    if not sucesso: print('Todas as buscas falharam; continuando com os links fixos.')
-    print('Links encontrados:',len(links))
-    verificadas = 0
-    falhas = 0
-    for url in sorted(links, key=lambda u: (u not in LINKS_FIXOS, u)):
-        print('Consultando:', url)
-        for nome, preco, origem, vendedor, link, codigo in verificar(url):
-            verificadas += 1
-            print(origem, nome, preco)
-            if preco >= LIMITE: continue
-            chave = hashlib.sha256((link+'|'+str(vendedor)).encode()).hexdigest()
-            if chave in historico and preco >= historico[chave]: continue
-            valor = f'{preco:.2f}'.replace('.',',')
-            modelo = 'Codigo identificado' if codigo else 'Nome compativel; confira o codigo'
-            msg = f'🚨 POSSÍVEL OFERTA GTA VI\n\n🎮 {nome}\n💰 R$ {valor}\n🏪 {origem}\n👤 Vendedor: {vendedor}\n📦 Estoque declarado na pagina\n🔎 {modelo}\n\nConfira vendedor, originalidade, frete, impostos e preco final.\n🔗 {link}'
-            if telegram(msg):
-                historico[chave] = preco
-                ARQUIVO.write_text(json.dumps(historico,indent=2)+'\n',encoding='utf-8')
-            else: falhas += 1
-        time.sleep(1)
-    print('Ofertas verificadas:',verificadas)
-    if not verificadas: raise SystemExit('Nenhuma oferta validada; confira os logs. Isso nao comprova ausencia de estoque.')
-    if falhas: raise SystemExit('Falha ao enviar uma ou mais notificacoes.')
-
-if __name__ == '__main__': main()
