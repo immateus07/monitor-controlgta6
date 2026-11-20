@@ -47,7 +47,12 @@ def verificar(url):
     except requests.RequestException as e:
         print('Pagina indisponivel:', url, 'HTTP:', e.response.status_code if e.response is not None else 'sem resposta')
         return
-    for script in BeautifulSoup(r.text,'html.parser').find_all('script',type='application/ld+json'):
+    soup = BeautifulSoup(r.text, 'html.parser')
+    scripts = soup.find_all('script', type='application/ld+json')
+    print('HTTP:', r.status_code, '| URL final:', r.url, '| bytes:', len(r.content), flush=True)
+    print('Titulo:', soup.title.get_text(strip=True)[:180] if soup.title else '(sem titulo)', '| JSON-LD:', len(scripts), flush=True)
+    print('Metadados de preco:', [(m.get('property') or m.get('itemprop'), m.get('content')) for m in soup.find_all('meta') if 'price' in str(m.get('property') or m.get('itemprop') or '').lower()][:8], flush=True)
+    for script in scripts:
         try: dados = json.loads(script.get_text())
         except (ValueError, TypeError): continue
         for p in percorrer(dados):
@@ -55,6 +60,7 @@ def verificar(url):
             if isinstance(tipos,str): tipos = [tipos]
             if not isinstance(tipos,list) or 'Product' not in tipos: continue
             nome = str(p.get('name',''))
+            print('Product encontrado:', nome[:180], '| SKU:', p.get('sku'), '| MPN:', p.get('mpn'), flush=True)
             texto = norm(nome)
             codigo = MODELO in ' '.join(str(p.get(k,'')) for k in ('sku','mpn','model','gtin'))
             if '1000056978' in str(p) or 'branco' in texto or 'white' in texto: continue
@@ -64,7 +70,9 @@ def verificar(url):
             if isinstance(ofertas,dict): ofertas = [ofertas]
             if not isinstance(ofertas,list): continue
             for o in ofertas:
-                if not isinstance(o,dict) or str(o.get('priceCurrency','')).upper() != 'BRL': continue
+                if not isinstance(o,dict): continue
+                print('Dados da oferta:', {k: o.get(k) for k in ('@type','price','priceCurrency','availability','itemCondition')}, flush=True)
+                if str(o.get('priceCurrency','')).upper() != 'BRL': continue
                 if str(o.get('availability','')).rstrip('/').split('/')[-1] != 'InStock': continue
                 if any(t in str(o.get('itemCondition','')) for t in ('UsedCondition','RefurbishedCondition','DamagedCondition')): continue
                 try: preco = float(o['price'])
@@ -75,6 +83,7 @@ def verificar(url):
                 yield nome, preco, nome_loja, vendedor or 'Nao informado', r.url, codigo
 
 def main():
+    print('Monitor v2.1 - diagnostico de paginas', flush=True)
     if os.getenv('TESTE_TELEGRAM','').lower() == 'true':
         if not telegram('✅ Monitor GTA VI conectado! Limite: abaixo de R$ 600. Busca a cada hora.'): raise SystemExit('Falha no teste do Telegram. Confira os Secrets.')
     historico = json.loads(ARQUIVO.read_text(encoding='utf-8')) if ARQUIVO.exists() else {}
@@ -87,7 +96,7 @@ def main():
                 u = item.get('href','')
                 if loja(u): links.add(u)
             sucesso += 1
-        except Exception as e: print('Falha de busca:', type(e).__name__)
+        except Exception as e: print('Falha de busca:', type(e).__name__, str(e)[:350], flush=True)
         time.sleep(2)
     if not sucesso: print('Todas as buscas falharam; continuando com os links fixos.')
     print('Links encontrados:',len(links))
