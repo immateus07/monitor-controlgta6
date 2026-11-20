@@ -10,9 +10,25 @@
           "preco": 599.0,
           "status": "Sem estoque",
           "elegivel": true
+        },
+        "Amazon|nao informado": {
+          "preco": null,
+          "status": "Sem estoque",
+          "elegivel": false
         }
       },
       "links": []
     }
+  },
+  "_v5_offset": 312540864,
+  "_v5_hora": "2026-11-20 12",
+  "_v5_status": {
+    "hora": "2026-11-20T12:57:52.094517-03:00",
+    "linhas": [
+      "DualSense GTA VI Preto — buscas respondidas: 0/3",
+      "KaBuM: Sem estoque | R$ 599.00 | duplicado ignorado",
+      "Amazon: Sem estoque | preço não confirmado | fora do filtro ou sem preço confirmado"
+    ],
+    "total": 2
   }
 }
