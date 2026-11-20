@@ -239,7 +239,7 @@ def monitorar(cfg,h,cache):
 
 
 def main():
-    print('Monitor v6.0 — Friday interativo',flush=True)
+    print('Monitor v7.0 — somente ofertas',flush=True)
     configs=carregar_produtos()
     cache=json.loads(ARQUIVO.read_text(encoding='utf-8')) if ARQUIVO.exists() else {}
     if not isinstance(cache,dict): raise ValueError('Histórico inválido')
@@ -256,7 +256,7 @@ def main():
     teste=os.getenv('TESTE_TELEGRAM','').lower()=='true'
     agora=datetime.now(ZoneInfo('America/Sao_Paulo'))
     slot=agora.strftime('%Y-%m-%d %H')
-    buscar=comandos(configs,cache)
+    buscar=False  # Telegram agora usa webhook
     configs=[c for c in configs if c.get('ativo',True)]
     if not (teste or buscar or cache.get('_v5_hora')!=slot):
         salvar(cache); print('Comandos processados; busca horária já realizada.'); return
@@ -269,7 +269,7 @@ def main():
     cache['_v5_status']={'hora':agora.isoformat(),'linhas':linhas,'total':total}
     dia=agora.date().isoformat()
     if teste or (agora.hour>=8 and cache.get('_v4_resumo')!=dia):
-        texto='📋 Relatório Friday v6.0\n'+('\n'.join(linhas) if linhas else 'Nenhum produto ativo.')+'\nFalha de consulta não significa falta de estoque.'
+        texto='📋 Relatório Friday v7.0\n'+('\n'.join(linhas) if linhas else 'Nenhum produto ativo.')+'\nFalha de consulta não significa falta de estoque.'
         partes=[]
         while texto:
             partes.append(texto[:3500]); texto=texto[3500:]
@@ -281,141 +281,5 @@ def main():
     print('Produtos ativos:',len(configs),'| Ofertas verificadas:',total,flush=True)
     if not total and configs: print('::warning::Nenhuma oferta validada; estoque desconhecido.')
     if falhas: raise SystemExit(1)
-
-def gravar_produtos(configs):
-    p=Path('produtos.json'); tmp=p.with_suffix('.tmp')
-    tmp.write_text(json.dumps(configs,ensure_ascii=False,indent=2)+'\n',encoding='utf-8'); tmp.replace(p)
-
-AJUDA = """Comandos do monitor:
-/produtos
-/adicionar nome | preço | modelo opcional | termos separados por vírgula
-/preco ID | 800
-/pausar ID
-/ativar ID
-/remover ID
-/link ID | https://loja/produto
-/estoque ID | sim ou nao
-/importacao ID | USD | cambio | frete BRL | impostos BRL
-/buscar
-/status
-/ajuda
-Use /produtos para copiar o ID. Configurações e histórico ficam no repositório."""
-
-def aplicar(texto, configs, cache):
-    import uuid
-    cmd, _, arg=texto.strip().partition(' '); cmd=cmd.lower().split('@')[0]
-    partes=[x.strip() for x in arg.split('|')]
-    if cmd in ('/ajuda','/start'): return AJUDA,False,False
-    if cmd=='/produtos':
-        return ('\n'.join(f"{c['id']} — {c['nome']} | R$ {c['preco_maximo']:.2f} | {'ativo' if c.get('ativo',True) else 'pausado'}" for c in configs) or 'Nenhum produto.'),False,False
-    if cmd=='/status':
-        st=cache.get('_v5_status',{}); return ('Última busca: '+st.get('hora','ainda não realizada')+'\n'+'\n'.join(st.get('linhas',[]))),False,False
-    if cmd=='/buscar': return 'Busca solicitada nesta execução.',False,True
-    if cmd=='/adicionar':
-        if len(partes)<2 or not partes[0]: raise ValueError('Use /adicionar nome | preço | modelo opcional | termos')
-        if len(configs)>=10: raise ValueError('Limite de 10 cadastros nesta versão.')
-        nome=partes[0]; v=preco_num(partes[1]); modelo=partes[2] if len(partes)>2 else ''
-        termos=[x.strip() for x in partes[3].split(',') if x.strip()] if len(partes)>3 else nome.split()
-        if v is None or not (modelo or termos): raise ValueError('Preço ou identificação inválidos.')
-        ident='p-'+uuid.uuid4().hex[:10]
-        configs.append(dict(id=ident,nome=nome,modelo=modelo,preco_maximo=v,ativo=True,avisar_sem_estoque=True,avisar_pre_venda=True,consulta=nome+' '+modelo+' Brasil',termos_obrigatorios=termos,termos_excluidos=[],links=[]))
-        return 'Cadastrado: '+ident,True,False
-    if cmd not in ('/preco','/pausar','/ativar','/remover','/link','/estoque','/importacao'): return AJUDA,False,False
-    c=next((c for c in configs if c['id']==partes[0]),None)
-    if c is None: raise ValueError('ID não encontrado. Consulte /produtos.')
-    if cmd=='/preco':
-        v=preco_num(partes[1]) if len(partes)==2 else None
-        if v is None: raise ValueError('Use /preco ID | 800')
-        c['preco_maximo']=v
-    elif cmd=='/pausar': c['ativo']=False
-    elif cmd=='/ativar': c['ativo']=True
-    elif cmd=='/remover': configs.remove(c)
-    elif cmd=='/link':
-        if len(partes)!=2 or not loja(partes[1]) or not pagina_produto(partes[1]): raise ValueError('Informe link direto HTTPS de loja permitida.')
-        c['links']=list(dict.fromkeys(c.get('links',[])+[canon(partes[1])]))[:15]
-    elif cmd=='/importacao':
-        if len(partes)!=5 or not re.fullmatch('[A-Z]{3}',partes[1].upper()): raise ValueError('Use /importacao ID | USD | cambio | frete BRL | impostos BRL')
-        valores=[float(x.replace(',','.')) for x in partes[2:]]
-        if not all(0<=v<float('inf') for v in valores) or valores[0]<=0: raise ValueError('Valores inválidos')
-        c.setdefault('importacao',{})[partes[1].upper()]=dict(zip(('cambio','frete_brl','impostos_brl'),valores))
-    elif cmd=='/estoque':
-        if len(partes)!=2 or norm(partes[1]) not in ('sim','nao'): raise ValueError('Use /estoque ID | sim ou nao')
-        c['avisar_sem_estoque']=norm(partes[1])=='sim'
-    return 'Configuração atualizada: '+c['id'],True,False
-
-MENU = {'keyboard':[[{'text':'➕ Adicionar produto'},{'text':'📋 Meus produtos'}],[{'text':'💰 Alterar preço'},{'text':'🔎 Buscar agora'}],[{'text':'⏸️ Pausar'},{'text':'▶️ Ativar'},{'text':'🗑️ Remover'}],[{'text':'🏪 Adicionar loja'},{'text':'⚙️ Configurações'}],[{'text':'📊 Status'},{'text':'❓ Ajuda'},{'text':'Cancelar'}]],'resize_keyboard':True}
-ACOES={'💰 Alterar preço':'preco','⏸️ Pausar':'pausar','▶️ Ativar':'ativar','🗑️ Remover':'remover','🏪 Adicionar loja':'link','⚙️ Configurações':'estoque'}
-ATALHOS={'📋 Meus produtos':'/produtos','🔎 Buscar agora':'/buscar','📊 Status':'/status','❓ Ajuda':'/ajuda'}
-
-def guiado(texto,configs,cache):
-    texto=texto.strip()
-    st=cache.get('_v6_dialogo',{})
-    if texto in ('Cancelar','/cancelar','/menu','/start'):
-        cache.pop('_v6_dialogo',None)
-        return '🤖 Friday — escolha uma opção no menu.',False,False,MENU
-    if texto.startswith('/') or texto in ATALHOS:
-        cache.pop('_v6_dialogo',None)
-        r,m,b=aplicar(ATALHOS.get(texto,texto),configs,cache)
-        return r,m,b,MENU
-    if texto=='➕ Adicionar produto':
-        cache['_v6_dialogo']={'etapa':'nome'}
-        return 'Qual é o nome do produto?',False,False,MENU
-    if texto in ACOES:
-        if not configs: return 'Nenhum produto cadastrado.',False,False,MENU
-        cache['_v6_dialogo']={'etapa':'selecionar','acao':ACOES[texto]}
-        teclado={'keyboard':[[{'text':f"{c['nome']} | {c['id']}"}] for c in configs]+[[{'text':'Cancelar'}]],'resize_keyboard':True}
-        return 'Selecione o produto:',False,False,teclado
-    etapa=st.get('etapa')
-    if etapa=='nome':
-        if not texto or len(texto)>120 or '|' in texto: raise ValueError('Informe nome de até 120 caracteres, sem |.')
-        st.update(nome=texto,etapa='valor'); return 'Qual o preço máximo em reais? Ex.: 800',False,False,MENU
-    if etapa=='valor':
-        v=preco_num(texto)
-        if v is None: raise ValueError('Informe um preço positivo.')
-        st.update(valor=v,etapa='modelo'); return 'Qual o código exato do modelo? Envie - se não souber.',False,False,MENU
-    if etapa=='modelo':
-        if '|' in texto: raise ValueError('Não use | no modelo.')
-        st.update(modelo='' if texto=='-' else texto,etapa='termos'); return 'Termos obrigatórios separados por vírgula (marca, modelo, tamanho, cor). Envie - para usar o nome.',False,False,MENU
-    if etapa=='termos':
-        if '|' in texto: raise ValueError('Não use | nos termos.')
-        termos=', '.join(st['nome'].split()) if texto=='-' else texto
-        r,m,b=aplicar(f"/adicionar {st['nome']} | {st['valor']} | {st['modelo']} | {termos}",configs,cache)
-        cache.pop('_v6_dialogo',None); return r,m,b,MENU
-    if etapa=='selecionar':
-        ident=texto.rsplit(' | ',1)[-1]
-        if not any(c['id']==ident for c in configs): raise ValueError('Selecione um produto válido ou cancele.')
-        acao=st['acao']; st['id']=ident
-        if acao in ('pausar','ativar'):
-            r,m,b=aplicar('/'+acao+' '+ident,configs,cache); cache.pop('_v6_dialogo',None); return r,m,b,MENU
-        st['etapa']='confirmar' if acao=='remover' else 'parametro'
-        prompt={'remover':'Digite SIM para confirmar a remoção, ou Cancelar.','preco':'Digite o novo preço máximo em reais.','link':'Cole o link HTTPS direto da página do produto.','estoque':'Avisar quando estiver sem estoque? Responda sim ou nao.'}[acao]
-        return prompt,False,False,MENU
-    if etapa=='confirmar':
-        if norm(texto)!='sim': raise ValueError('Digite SIM ou Cancelar.')
-        r,m,b=aplicar('/remover '+st['id'],configs,cache); cache.pop('_v6_dialogo',None); return r,m,b,MENU
-    if etapa=='parametro':
-        r,m,b=aplicar('/'+st['acao']+' '+st['id']+' | '+texto,configs,cache); cache.pop('_v6_dialogo',None); return r,m,b,MENU
-    return 'Use os botões ou /menu para começar.',False,False,MENU
-
-def comandos(configs,cache):
-    buscar=False
-    try:
-        r=requests.post('https://api.telegram.org/bot'+os.environ['TELEGRAM_BOT_TOKEN']+'/getUpdates',json={'offset':cache.get('_v5_offset',0),'timeout':0,'allowed_updates':['message']},timeout=15)
-        r.raise_for_status(); dados=r.json()
-        if not dados.get('ok'): raise ValueError('getUpdates recusado')
-    except (requests.RequestException,ValueError,KeyError):
-        print('Telegram: não foi possível consultar comandos; monitor segue.'); return False
-    for u in dados.get('result',[]):
-        m=u.get('message',{}); chat=m.get('chat',{})
-        if str(chat.get('id'))==os.environ['TELEGRAM_CHAT_ID'] and chat.get('type')=='private' and str(m.get('from',{}).get('id'))==os.environ['TELEGRAM_CHAT_ID'] and isinstance(m.get('text'),str):
-            try:
-                resposta,mudou,agora,teclado=guiado(m['text'],configs,cache)
-                if mudou: gravar_produtos(configs)
-                buscar=buscar or agora
-            except (ValueError,IndexError) as e: resposta=str(e); teclado=MENU
-            for i in range(0,len(resposta),3500): telegram(resposta[i:i+3500],teclado)
-        cache['_v5_offset']=max(cache.get('_v5_offset',0),u['update_id']+1)
-        salvar(cache)
-    return buscar
 
 if __name__=='__main__': main()
