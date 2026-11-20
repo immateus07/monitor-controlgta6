@@ -2,5 +2,17 @@
   "8b6c398950713b4ac474adb904fb1944509c81f61472ad7837b53a4c428cec22": {
     "preco": 599.0,
     "status": "sem estoque"
+  },
+  "_v4_produtos": {
+    "dualsense-gta6-preto": {
+      "ofertas": {
+        "KaBuM|nao informado": {
+          "preco": 599.0,
+          "status": "Sem estoque",
+          "elegivel": true
+        }
+      },
+      "links": []
+    }
   }
 }
