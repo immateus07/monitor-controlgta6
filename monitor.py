@@ -9,6 +9,10 @@ LIMITE = 600
 MODELO = '1000056977'
 LOJAS = {'amazon.com.br':'Amazon', 'kabum.com.br':'KaBuM', 'magazineluiza.com.br':'Magalu', 'mercadolivre.com.br':'Mercado Livre', 'fastshop.com.br':'Fast Shop', 'casasbahia.com.br':'Casas Bahia', 'pontofrio.com.br':'Ponto Frio', 'carrefour.com.br':'Carrefour', 'sony.com.br':'Sony', 'playstation.com':'PlayStation'}
 ARQUIVO = Path('historico.json')
+LINKS_FIXOS = {
+    'https://www.kabum.com.br/produto/1071923/controle-sem-fio-sony-dualsense-ps5-edicao-limitada-grand-theft-auto-vi-preto-1000056977',
+    'https://www.amazon.com.br/dp/B0HHNVBHQ5',
+}
 
 def norm(s):
     return ''.join(c for c in unicodedata.normalize('NFD', str(s).lower()) if not unicodedata.combining(c))
@@ -40,8 +44,8 @@ def verificar(url):
         r.raise_for_status()
         nome_loja = loja(r.url)
         if not nome_loja: return
-    except requests.RequestException:
-        print('Pagina indisponivel:', url)
+    except requests.RequestException as e:
+        print('Pagina indisponivel:', url, 'HTTP:', e.response.status_code if e.response is not None else 'sem resposta')
         return
     for script in BeautifulSoup(r.text,'html.parser').find_all('script',type='application/ld+json'):
         try: dados = json.loads(script.get_text())
@@ -53,7 +57,8 @@ def verificar(url):
             nome = str(p.get('name',''))
             texto = norm(nome)
             codigo = MODELO in ' '.join(str(p.get(k,'')) for k in ('sku','mpn','model','gtin'))
-            if not (codigo or ('dualsense' in texto and any(t in texto for t in ('gta vi','gta 6','grand theft auto vi')))): continue
+            if '1000056978' in str(p) or 'branco' in texto or 'white' in texto: continue
+            if not (codigo or ('dualsense' in texto and any(t in texto for t in ('gta vi','gta 6','grand theft auto vi')) and any(t in texto for t in ('preto','black')))): continue
             if any(t in texto for t in ('adesivo','capa','skin','case','replica','usado','personalizado','customizado','carcaca','shell','seminovo')): continue
             ofertas = p.get('offers', [])
             if isinstance(ofertas,dict): ofertas = [ofertas]
@@ -73,7 +78,7 @@ def main():
     if os.getenv('TESTE_TELEGRAM','').lower() == 'true':
         if not telegram('✅ Monitor GTA VI conectado! Limite: abaixo de R$ 600. Busca a cada hora.'): raise SystemExit('Falha no teste do Telegram. Confira os Secrets.')
     historico = json.loads(ARQUIVO.read_text(encoding='utf-8')) if ARQUIVO.exists() else {}
-    links = set()
+    links = set(LINKS_FIXOS)
     consultas = ['"DualSense" "GTA VI" controle Brasil', '"1000056977" controle Brasil', '"DualSense" "Grand Theft Auto VI" edição limitada Brasil']
     sucesso = 0
     for q in consultas:
@@ -84,11 +89,12 @@ def main():
             sucesso += 1
         except Exception as e: print('Falha de busca:', type(e).__name__)
         time.sleep(2)
-    if not sucesso: raise SystemExit('Todas as buscas falharam. Nenhuma conclusao sobre ofertas.')
+    if not sucesso: print('Todas as buscas falharam; continuando com os links fixos.')
     print('Links encontrados:',len(links))
     verificadas = 0
     falhas = 0
-    for url in sorted(links):
+    for url in sorted(links, key=lambda u: (u not in LINKS_FIXOS, u)):
+        print('Consultando:', url)
         for nome, preco, origem, vendedor, link, codigo in verificar(url):
             verificadas += 1
             print(origem, nome, preco)
@@ -104,7 +110,7 @@ def main():
             else: falhas += 1
         time.sleep(1)
     print('Ofertas verificadas:',verificadas)
-    if not verificadas: print('Nenhuma oferta validada; isso nao comprova ausencia de estoque.')
+    if not verificadas: raise SystemExit('Nenhuma oferta validada; confira os logs. Isso nao comprova ausencia de estoque.')
     if falhas: raise SystemExit('Falha ao enviar uma ou mais notificacoes.')
 
 if __name__ == '__main__': main()
