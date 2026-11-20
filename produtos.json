@@ -1,0 +1,15 @@
+[
+  {
+    "id": "dualsense-gta6-preto",
+    "nome": "DualSense GTA VI Preto",
+    "modelo": "1000056977",
+    "preco_maximo": 800,
+    "ativo": true,
+    "avisar_sem_estoque": true,
+    "avisar_pre_venda": true,
+    "consulta": "DualSense GTA VI preto 1000056977 Brasil",
+    "termos_obrigatorios": ["dualsense", ["gta vi", "gta 6", "grand theft auto vi"], ["preto", "black"]],
+    "termos_excluidos": ["branco", "white", "1000056978", "personalizado", "customizado"],
+    "links": ["https://www.kabum.com.br/produto/1071923/controle-sem-fio-sony-dualsense-ps5-edicao-limitada-grand-theft-auto-vi-preto-1000056977", "https://www.amazon.com.br/dp/B0HHNVBHQ5"]
+  }
+]
